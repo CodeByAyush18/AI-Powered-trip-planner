@@ -134,26 +134,7 @@ if st.sidebar.button("🚀 Generate Itinerary", type="primary"):
                         df['lat'] = pd.to_numeric(df['lat'])
                         df['lon'] = pd.to_numeric(df['lon'])
 
-                        st.pydeck_chart(pdk.Deck(
-                            map_style='mapbox://styles/mapbox/light-v9',
-                            initial_view_state=pdk.ViewState(
-                                latitude=df['lat'].mean(),
-                                longitude=df['lon'].mean(),
-                                zoom=11,
-                                pitch=50,
-                            ),
-                            layers=[
-                                pdk.Layer(
-                                    'ScatterplotLayer',
-                                    data=df,
-                                    get_position='[lon, lat]',
-                                    get_color='[200, 30, 0, 160]',
-                                    get_radius=100,
-                                    pickable=True,
-                                ),
-                            ],
-                            tooltip={"html": "<b>{name}</b><br/>Day: {day}"}
-                        ))
+                        st.map(df)
                     else:
                         st.info("No location data was generated to display on the map.")
 
