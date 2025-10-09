@@ -1,52 +1,63 @@
 import streamlit as st
 from datetime import date
-import google.generativeai as genai
-import json
-import pandas as pd
-import pydeck as pdk
-import re
+import os
+from geopy.geocoders import Nominatim
+import folium
+from streamlit_folium import st_folium
+
+# --- LangChain Imports ---
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 # ------------------------------
-# 1️ Set Your API Key & Page Config
+# 1️⃣ Set Your API Key
 # ------------------------------
+# WARNING: Hardcoding API keys is not recommended. Use secrets management for production.
+API_KEY = "AIzaSyAWa1kMHQCbJGEkb8sUSmtkiLw6zjpoc1E"
+# Setting the API key for LangChain
+os.environ["GOOGLE_API_KEY"] = API_KEY
 
-API_KEY = "AIzaSyAQMAsTLl5cM1OuG-XZBmg5p38K_rQhJfA" 
-
-
-try:
-    genai.configure(api_key=API_KEY)
-except Exception as e:
-    st.error(f"Failed to configure API key: {e}", icon="🔑")
-
+# ------------------------------
+# 2️⃣ Streamlit Page Config
+# ------------------------------
 st.set_page_config(
     page_title="🌍 AI Travel Planner",
     page_icon="🧳",
-    layout="wide" 
+    layout="centered"
 )
 
+# --- FIX 1: Initialize Session State ---
+# This ensures the variable exists across reruns
+if 'itinerary' not in st.session_state:
+    st.session_state.itinerary = None
+if 'destination_for_map' not in st.session_state:
+    st.session_state.destination_for_map = ""
+
+
 st.title("🌍 AI Smart Travel Planner")
-st.write("Plan your trip with personalized recommendations and an interactive map, powered by Gemini AI.")
+st.write("Plan your trip with personalized recommendations powered by LangChain & Gemini.")
 
 # ------------------------------
-# 2️ User Inputs (in a sidebar)
+# 3️⃣ User Inputs
 # ------------------------------
-with st.sidebar:
-    st.header("⚙️ Your Trip Details")
-    destination = st.text_input("🏙️ Destination", placeholder="e.g., Paris, France")
-    start_date = st.date_input("📅 Start date", value=None, min_value=date.today())
-    duration = st.number_input("🕒 Duration (days)", min_value=1, step=1, value=5)
-    budget_level = st.selectbox("💰 Budget level", ["tight", "moderate", "flexible"])
-    stay_type = st.selectbox("🏠 Stay type", ["hostel", "hotel", "resort", "homestay"])
-    interests = st.text_input("🎯 Interests", placeholder="e.g., food, museums, hiking")
+destination = st.text_input("🏙️ Destination", placeholder="e.g., Paris")
+start_date = st.date_input("📅 Start date", value=None, min_value=date.today())
+duration = st.number_input("🕒 Duration (days)", min_value=1, step=1, value=5)
+budget_level = st.selectbox("💰 Budget level", ["tight", "moderate", "flexible"])
+stay_type = st.selectbox("🏠 Stay type", ["hostel", "hotel", "resort", "homestay"])
+interests = st.text_input("🎯 Interests (comma-separated)", placeholder="e.g., food, monuments, nature, beaches")
 
 
-# 3️ Build Prompt with JSON Instruction 
-
-def build_prompt(destination, start_date, duration, budget_level, stay_type, interests):
-    start_date_str = f"starting on {start_date.strftime('%B %d, %Y')}" if start_date else ""
-
-  
-    main_prompt = f"""
+# ------------------------------
+# 4️⃣ LangChain Itinerary Generation Function
+# ------------------------------
+def generate_itinerary_with_langchain(destination, start_date, duration, budget_level, stay_type, interests):
+    """
+    Generates the itinerary by invoking a LangChain chain.
+    """
+    # 1. Define the Prompt Template
+    prompt_template_str = """
 You are a professional AI travel planner. Your responses should be helpful, friendly, and engaging.
 
 Create a detailed {duration}-day travel itinerary for {destination}, {start_date_str}.
@@ -54,95 +65,106 @@ The user has a '{budget_level}' budget and prefers to stay in a '{stay_type}'.
 Their interests are: '{interests}'.
 
 Your itinerary should include:
-1. A day-wise plan with specific suggestions for morning, afternoon, and evening activities.
-2. Recommendations for transportation within the destination.
-3. Suggestions for accommodation based on the user's preference and budget.
-4. A list of local foods and unique experiences they shouldn't miss.
-5. An estimated total cost breakdown.
+1️⃣ A day-wise plan with specific suggestions for morning, afternoon, and evening activities.
+2️⃣ Recommendations for transportation within the destination (e.g., metro, bus, ride-sharing).
+3️⃣ Suggestions for accommodation based on the user's preference and budget.
+4️⃣ A list of local foods and unique experiences they shouldn't miss.
+5️⃣ An estimated total cost breakdown (accommodation, food, activities, transport).
 
-Format the text output beautifully using emojis and markdown.
+Format the entire output beautifully using emojis, bullet points, and clear, readable spacing. Make it look like a professional travel guide.
 """
+    prompt_template = ChatPromptTemplate.from_template(prompt_template_str)
 
- 
-    json_instruction = """
-### IMPORTANT ###
-Finally, embed a single JSON object at the very end of your response, enclosed in ```json ... ```. This JSON should contain a list of key locations mentioned. Each location must have "name", "day", "lat", and "lon".
+    # 2. Initialize the LLM with the user-specified model name
+    llm = ChatGoogleGenerativeAI(model="gemini-pro-latest", temperature=0.7)
 
-Example JSON format:
-```json
-{
-  "locations": [
-    { "name": "Eiffel Tower", "day": 1, "lat": 48.8584, "lon": 2.2945 },
-    { "name": "Louvre Museum", "day": 2, "lat": 48.8606, "lon": 2.3376 }
-  ]
-}"""
-    return main_prompt + json_instruction
-# ------------------------------
-# 4️ Generate Itinerary & Parse Response
-# ------------------------------
-def generate_itinerary(prompt):
+    # 3. Define the Output Parser
+    output_parser = StrOutputParser()
+
+    # 4. Create the Chain
+    chain = prompt_template | llm | output_parser
+
+    # Format the start date for the prompt
+    start_date_str = f"starting on {start_date.strftime('%B %d, %Y')}" if start_date else ""
+
     try:
-        model = genai.GenerativeModel('gemini-pro-latest')
-        response = model.generate_content(prompt)
-        full_text = response.text
-        locations = None
-
-
-        match = re.search(r"```json\s*(\{.*?\})\s*```|(\{.*locations.*?\})", full_text, re.DOTALL)
-        
-        if match:
-          
-            json_str = match.group(1) if match.group(1) else match.group(2)
-            
-            try:
-                data = json.loads(json_str)
-                locations = data.get("locations")
-                
-
-                clean_text = full_text.replace(match.group(0), "").strip()
-                
-                return clean_text, locations
-            except (json.JSONDecodeError, KeyError) as e:
-                st.warning(f"Found a JSON-like block but could not parse it. Displaying full text. Error: {e}")
-                return full_text, None 
-
-        return full_text, None
-
+        # 5. Invoke the Chain with user inputs
+        itinerary = chain.invoke({
+            "duration": duration,
+            "destination": destination,
+            "start_date_str": start_date_str,
+            "budget_level": budget_level,
+            "stay_type": stay_type,
+            "interests": interests
+        })
+        return itinerary
     except Exception as e:
-        st.error(f"⚠️ An error occurred while contacting the API: {e}")
-        return None, None
+        st.error(f"⚠️ An error occurred while generating the itinerary: {e}")
+        return None
 
-# 5️ Generate Button & Display
+# ------------------------------
+# 5️⃣ Get Coordinates Function (No change)
+# ------------------------------
+def get_coordinates(place_name):
+    """
+    Geocodes a place name to get its latitude and longitude.
+    """
+    try:
+        geolocator = Nominatim(user_agent="ai_travel_planner")
+        location = geolocator.geocode(place_name)
+        if location:
+            return (location.latitude, location.longitude)
+    except Exception as e:
+        st.warning(f"Could not retrieve coordinates. Map may not be accurate. Error: {e}")
+    return None
 
-if st.sidebar.button("🚀 Generate Itinerary", type="primary"):
+# ------------------------------
+# 6️⃣ Generate Button Logic
+# ------------------------------
+if st.button("🚀 Generate Itinerary", type="primary"):
     if not destination.strip():
-        st.warning("Please enter a destination.")
+        st.warning("Please enter a destination before generating your itinerary.")
     else:
-        with st.spinner("Crafting your perfect itinerary... This may take a moment. 🧳"):
-            prompt = build_prompt(destination, start_date, duration, budget_level, stay_type, interests)
-            itinerary_text, locations = generate_itinerary(prompt)
+        with st.spinner("Crafting your perfect itinerary with LangChain... ⛓️"):
+            itinerary_result = generate_itinerary_with_langchain(
+                destination, start_date, duration, budget_level, stay_type, interests
+            )
+            # --- FIX 2: Save the result to Session State ---
+            st.session_state.itinerary = itinerary_result
+            st.session_state.destination_for_map = destination
 
-            if itinerary_text:
-                st.success("✅ Your personalized itinerary is ready!")
-                
-                col1, col2 = st.columns([1, 1.2])
 
-                with col1:
-                    st.subheader("📍 Interactive Map")
-                    if locations:
-                        df = pd.DataFrame(locations)
-                        df['lat'] = pd.to_numeric(df['lat'])
-                        df['lon'] = pd.to_numeric(df['lon'])
+# ------------------------------
+# 7️⃣ Display Logic (Now outside the button block)
+# ------------------------------
+# --- FIX 3: Display from Session State if it exists ---
+if st.session_state.itinerary:
+    st.success("✅ Your personalized itinerary is ready!")
+    st.markdown(st.session_state.itinerary)
 
-                        st.map(df)
-                    else:
-                        st.info("No location data was generated to display on the map.")
+    # --- Interactive Map Display using Folium ---
+    st.markdown("---")
+    st.subheader("📍 Interactive Map")
+    coords = get_coordinates(st.session_state.destination_for_map)
 
-                with col2:
-                    st.subheader("📝 Your Itinerary")
-                    st.markdown(itinerary_text)
-                    st.download_button(
-                        "📥 Download Itinerary",
-                        data=itinerary_text,
-                        file_name=f"{destination.replace(' ', '_')}_itinerary.txt"
-                    )
+    if coords:
+        m = folium.Map(location=coords, zoom_start=13)
+        folium.Marker(coords, popup=st.session_state.destination_for_map, tooltip=st.session_state.destination_for_map).add_to(m)
+        st_folium(m, width=700, height=500)
+    else:
+        st.warning("Could not generate a map for the specified destination.")
+
+    # Download button
+    st.download_button(
+        "📥 Download Itinerary",
+        data=st.session_state.itinerary,
+        file_name=f"{st.session_state.destination_for_map.replace(' ', '_')}_itinerary.txt",
+        mime="text/plain"
+    )
+
+# ------------------------------
+# 8️⃣ Footer
+# ------------------------------
+st.markdown("---")
+st.caption("✨ Built with LangChain & Gemini | A project by CodeWithAyush18")
+
